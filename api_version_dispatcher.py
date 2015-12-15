@@ -96,7 +96,6 @@ class AppVersion(object):
             return version
         ver_list = filter(lambda v: v.app_name == version.app_name or v.app_name == cls.DEFAULT_VERSION_NAME, ver_list) + [version]
         ver_list.sort()
-        print ver_list
         index = ver_list.index(version)
         if index == 0:
             return None
@@ -265,7 +264,6 @@ def version(ver_num, ver_class=AppVersion):
         if not dispatcher:
             # 添加dispatcher
             dispatcher = type(view_name, (VersionDispatcher, View), {})
-            global dispatcher
 
         if hasattr(ver_num, '__iter__'):
             for ver in ver_num:
@@ -277,10 +275,10 @@ def version(ver_num, ver_class=AppVersion):
 
 
 if __name__ == '__main__':
-    @version('')
-    class A(View):
-        def dispatch(request, *args, **kwargs):
-            print 1
+    # @version('')
+    # class A(View):
+    #     def dispatch(request, *args, **kwargs):
+    #         print 1
 
     @version('B 2')
     class A(View):
@@ -295,4 +293,3 @@ if __name__ == '__main__':
         print 9.1
     request = type('req', (object, ), {'GET': {}, 'META': {'HTTP_APP_VERSION': 'B 2.10'}})()
     print A().dispatch(request)
-    print A().__class__.CLASS_TYPE
