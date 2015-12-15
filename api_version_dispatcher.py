@@ -12,7 +12,6 @@ from django.utils import simplejson
 from django.utils.decorators import classonlymethod
 from django.views.generic import View
 
-DEFAULT_VERSION = ''
 
 def is_func(target):
     return hasattr(target, 'func_dict')
@@ -42,6 +41,7 @@ class NotSameAppException(Exception):
     def __init__(self):
         super(NotSameAppException, self).__init__('Not same App. Can\'t compare version.')
 
+
 ##########################################################
 #
 #     自定义部分
@@ -53,7 +53,13 @@ class AppVersion(object):
 
     }
 
+    DEFAULT_VERSION_NAME = '_DEFAULT_VER'
+    DEFAULT_VERSION_SEQ = [0]
+    DEFAULT_STR = DEFAULT_VERSION_NAME + ' ' + '.'.join(map(str, DEFAULT_VERSION_SEQ))
+
     def __new__(cls, ver_str):
+        if not ver_str:
+            ver_str = cls.DEFAULT_STR
         if ver_str in cls.app_versions:
             return cls.app_versions[ver_str]
         else:
@@ -63,19 +69,13 @@ class AppVersion(object):
 
     def __init__(self, ver_str):
         if not ver_str:
-            self.init_default_ver()
+            ver_str = self.DEFAULT_STR
         ver_pattern = ver_str.split(' ')
         if len(ver_pattern) != 2:
             raise ValueError('Version string not in format.')
         self.app_name, app_ver_str = ver_pattern
         self.version_seq = map(int, app_ver_str.split('.'))
         self.ver_str = ver_str
-
-    def init_default_ver(self):
-        """ 初始化默认版本
-        :return:
-        """
-        pass
 
     @classmethod
     def get_version_via_req(cls, request):
@@ -94,8 +94,9 @@ class AppVersion(object):
         """
         if version in ver_list:
             return version
-        ver_list = ver_list + [version]
+        ver_list = filter(lambda v: v.app_name == version.app_name or v.app_name == cls.DEFAULT_VERSION_NAME, ver_list) + [version]
         ver_list.sort()
+        print ver_list
         index = ver_list.index(version)
         if index == 0:
             return None
@@ -110,27 +111,28 @@ class AppVersion(object):
         """
         raise error
 
-    def __cmp__(v1, v2):
+    def __cmp__(self, v2):
         """ 比较两个版本号
-        :param v1: 版本号1(AppVersion)
+        :param self: 版本号1(AppVersion)
         :param v2: 版本号2(AppVersion)
         :return: v1 >= v2 (bool)
         """
-        if v1.app_name != v2.app_name:
-            raise NotSameAppException()
-        v1_seq = v1.version_seq
-        v2_seq = v2.version_seq
-        len_dif = len(v1_seq) - len(v2_seq)
-        if len_dif > 0:
-            v2_seq += [0] * len_dif
-        else:
-            v1_seq += [0] * len_dif
-        for ind in xrange(len(v1_seq)):
-            if v1_seq[ind] == v2_seq[ind]:
-                continue
+        if self.app_name == v2.app_name or self.DEFAULT_VERSION_NAME in (self.app_name, v2.app_name):
+            v1_seq = self.version_seq
+            v2_seq = v2.version_seq
+            len_dif = len(v1_seq) - len(v2_seq)
+            if len_dif > 0:
+                v2_seq += [0] * len_dif
             else:
-                return 1 if v1_seq[ind] > v2_seq[ind] else -1
-        return 0
+                v1_seq += [0] * len_dif
+            for ind in xrange(len(v1_seq)):
+                if v1_seq[ind] == v2_seq[ind]:
+                    continue
+                else:
+                    return 1 if v1_seq[ind] > v2_seq[ind] else -1
+            return 0
+        else:
+            raise NotSameAppException()
 
     @classmethod
     def str2version(cls, version):
@@ -162,8 +164,6 @@ class AppVersion(object):
 #    功能部分
 #
 #####################################################################
-
-
 class VersionDispatcher:
     """ View 版本分发器
     """
@@ -181,6 +181,25 @@ class VersionDispatcher:
 
     def dispatch(self, request, *args, **kwargs):
         """ 复写view的分发函数
+        :param request: request请求(Request)
+        :return: 分发后的结果
+        """
+        try:
+            version = self.version_class.get_version_via_req(request)
+            view_type, real_view = self.get_version_view(version)
+            if view_type == self.CLASS_TYPE:
+                return real_view(**self.kwargs).dispatch(request, *args, **kwargs)
+            else:
+                return real_view(request, **kwargs)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error_msg = self.version_class.handle_version_error(e)
+            return HttpResponse(simplejson.dumps(error_msg),
+                            mimetype='application/json')
+
+    def __call__(self, request, *args, **kwargs):
+        """ 复写函数view
         :param request: request请求(Request)
         :return: 分发后的结果
         """
@@ -258,22 +277,22 @@ def version(ver_num, ver_class=AppVersion):
 
 
 if __name__ == '__main__':
-    @version('C 1')
+    @version('')
     class A(View):
         def dispatch(request, *args, **kwargs):
             print 1
 
-    @version('C 2')
+    @version('B 2')
     class A(View):
         def dispatch(request, *args, **kwargs):
             print 2
-    # @version('C 9.10')
-    # def A(request, *args, **kwargs):
-    #     print 9.1, '>>>'
+    @version('C 9.10')
+    def A(request, *args, **kwargs):
+        print 9.1, '>>>'
 
-    @version(('C 1.1.1', 'C 9.10'))
+    @version(('C 1.1.1', 'B 9.10'))
     def A(request, *args, **kwargs):
         print 9.1
-    request = type('req', (object, ), {'GET': {}, 'META': {'HTTP_APP_VERSION': 'C 9.10'}})()
+    request = type('req', (object, ), {'GET': {}, 'META': {'HTTP_APP_VERSION': 'B 2.10'}})()
     print A().dispatch(request)
     print A().__class__.CLASS_TYPE
