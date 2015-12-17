@@ -7,10 +7,15 @@
 # 分发, 即创建对应版本实例 然后调用view的dispatch方法. 同一个view
 # 的不同版本将保存在他们对应的分发器的属性中.
 ########################################################
+from collections import defaultdict
+
 from django.http import HttpResponse
 from django.utils import simplejson
 from django.utils.decorators import classonlymethod
 from django.views.generic import View
+
+
+tree = lambda : defaultdict(tree)
 
 
 def is_func(target):
@@ -21,32 +26,36 @@ def is_view(target):
     return isinstance(target, type) and View in target.__mro__
 
 
-class NoVersionMatchException(Exception):
+class VersionException(Exception):
+    pass
+
+
+class NoVersionMatchException(VersionException):
     """ 版本不匹配错误
     """
-    def __init__(self):
-        super(NoVersionMatchException, self).__init__('Can\'t find a View matching this version.')
+    def __init__(self, version):
+        super(NoVersionMatchException, self).__init__('Can\'t find a View matching version %s.' % version)
 
 
-class SameVersionException(Exception):
+class SameVersionException(VersionException):
     """ 版本重复错误
     """
     def __init__(self):
-        super(SameVersionException, self).__init__('Same version of this view has already defined.')
+        super(SameVersionException, self).__init__('Same version: "%s" of this view has already defined.' % version)
 
 
-class NotSameAppException(Exception):
+class NotSameAppException(VersionException):
     """ 不是同一个app错误
     """
     def __init__(self):
         super(NotSameAppException, self).__init__('Not same App. Can\'t compare version.')
 
 
-class HasDefaultException(Exception):
+class HasDefaultException(VersionException):
     """ 已经有一个默认版本
     """
-    def __init__(self):
-        super(HasDefaultException, self).__init__("This Dispatcher has already had a default version.")
+    def __init__(self, view_name):
+        super(HasDefaultException, self).__init__('This Dispatcher: "%s" has already had a default version.' % view_name)
 
 ##########################################################
 #
@@ -116,7 +125,7 @@ class AppVersion(object):
         :param error: 版本错误时的信息
         :return: 返回的字符串(str)
         """
-        raise error
+        return error.message
 
     def __cmp__(self, v2):
         """ 比较两个版本号
@@ -183,7 +192,7 @@ class VersionDispatcher:
     """ View 版本分发器
     """
 
-    __version_view_dict__ = {}
+    __version_view_dict__ = tree()
 
     CLASS_TYPE = 'class_type'
     FUNC_TYPE = 'func_type'
@@ -202,11 +211,35 @@ class VersionDispatcher:
         """
         try:
             version = self.version_class.get_version_via_req(request)
-            view_type, real_view = self.get_version_view(version)
+            view_type, real_view = self.get_version_view(self.__class__.__name__, version)
             if view_type == self.CLASS_TYPE:
-                return real_view(**self.kwargs).dispatch(request, *args, **kwargs)
+                view_instance = real_view(**self.kwargs)
+                setattr(view_instance, '__version_dispatcher__', self)
+                return view_instance.dispatch(request, *args, **kwargs)
             else:
-                return real_view(request, **kwargs)
+                return real_view(request, _version_dispatcher=self, *args, **kwargs)
+        except VersionException as e:
+            import traceback
+            traceback.print_exc()
+            error_msg = self.version_class.handle_version_error(e)
+            return HttpResponse(simplejson.dumps(error_msg),
+                            mimetype='application/json')
+
+    def redispatch_to(self, version, request, *args, **kwargs):
+        """ 重新分发至指定版本
+        :param version: 版本号(AppVersion or str)
+        :param request: request请求(Request)
+        :return: 分发后的结果
+        """
+        try:
+            version = self.version_class.str2version(version)
+            view_type, real_view = self.get_version_view(self.__class__.__name__, version)
+            if view_type == self.CLASS_TYPE:
+                view_instance = real_view(**self.kwargs)
+                setattr(view_instance, '__version_dispatcher__', self)
+                return view_instance.dispatch(request, *args, **kwargs)
+            else:
+                return real_view(request, _version_dispatcher=self, *args, **kwargs)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -214,18 +247,23 @@ class VersionDispatcher:
             return HttpResponse(simplejson.dumps(error_msg),
                             mimetype='application/json')
 
-    def __call__(self, request, *args, **kwargs):
+    def __call__(self, request, _version='', *args, **kwargs):
         """ 复写函数view
         :param request: request请求(Request)
         :return: 分发后的结果
         """
         try:
-            version = self.version_class.get_version_via_req(request)
+            if not _version:
+                version = self.version_class.get_version_via_req(request)
+            else:
+                version = self.version_class.str2version(_version)
             view_type, real_view = self.get_version_view(version)
             if view_type == self.CLASS_TYPE:
-                return real_view(**self.kwargs).dispatch(request, *args, **kwargs)
+                view_instance = real_view(**self.kwargs)
+                setattr(view_instance, '__version_dispatcher__', self)
+                return view_instance.dispatch(request, *args, **kwargs)
             else:
-                return real_view(request, **kwargs)
+                return real_view(request, _version_dispatcher=self, *args, **kwargs)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -234,7 +272,7 @@ class VersionDispatcher:
                             mimetype='application/json')
 
     @classmethod
-    def get_version_view(cls, version=None):
+    def get_version_view(cls, view_name, version=None):
         """ 获取真正对应版本的View class
         :param version: 版本号(str)
         :param view_name: view名(str)
@@ -243,15 +281,15 @@ class VersionDispatcher:
             NoVersionMatchException 没有找到对应版本
         """
         version = AppVersion.str2version(version)
-        version = cls.version_class.find_closest_version(version, cls.__version_view_dict__.keys())
-        view_type, version_view = cls.__version_view_dict__.get(version, (None, None))
+        version = cls.version_class.find_closest_version(version, cls.__version_view_dict__[cls.__name__].keys())
+        view_type, version_view = cls.__version_view_dict__[view_name][version] or (None, None)
         if not version_view or not (is_func(version_view) or is_view(version_view)):
-            raise NoVersionMatchException()
+            raise NoVersionMatchException(version)
         return view_type, version_view
 
     @classmethod
     def version(cls, version=None):
-        return cls.get_version_view(version)[1]
+        return cls.get_version_view(cls.__name__, version)[1]
 
     @classonlymethod
     def add_version_view(cls, version, view):
@@ -265,7 +303,7 @@ class VersionDispatcher:
         version = AppVersion.str2version(version)
         if version.__default__():
             if cls.has_default:
-                raise HasDefaultException()
+                raise HasDefaultException(view.__name__)
             cls.has_default = True
 
         if cls.__version_view_dict__.get(version) is None:
@@ -276,10 +314,9 @@ class VersionDispatcher:
             else:
                 raise ValueError('View is not a valid class or functional django view.')
             setattr(view, 'view_dispatcher', cls)
-            cls.__version_view_dict__[version] = (view_type, view)
+            cls.__version_view_dict__[view.__name__][version] = (view_type, view)
         else:
             raise SameVersionException()
-
 
 def version(ver_num="", ver_class=AppVersion):
     """ 版本装饰器, 生成一个分发器代替被装饰的view, 进行分发操作, 原先的view被保存在分发器的字典属性中
@@ -288,11 +325,7 @@ def version(ver_num="", ver_class=AppVersion):
     """
     def view_wrapper(view):
         view_name = view.__name__
-        dispatcher = globals().get(view_name)
-        if not dispatcher:
-            # 添加dispatcher
-            dispatcher = type(view_name, (VersionDispatcher, View), {'__version_view_dict__': {}})
-
+        dispatcher = type(view_name, (VersionDispatcher, View), {})
         if hasattr(ver_num, '__iter__'):
             for ver in ver_num:
                 dispatcher.add_version_view(ver_class(ver), view)
