@@ -42,7 +42,7 @@ class AnApiView(View):
     pass
 
 @version('app_name 3.0.1')
-class AnApiView(AnApiView.version())):    # this view inhert from the first view.
+class AnApiView(AnApiView.version()):    # this view inhert from the first view.
     def some_method():
         pass
 
